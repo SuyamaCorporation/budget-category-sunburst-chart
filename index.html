@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Budget Category Sunburst Chart</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  canvas { cursor: pointer; }
+  .tooltip {
+    position: fixed;
+    background: rgba(0,0,0,0.8);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    pointer-events: none;
+    display: none;
+    z-index: 100;
+  }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="tooltip" class="tooltip"></div>
+<div class="max-w-6xl mx-auto px-4 py-8">
+  <h1 class="text-3xl font-bold text-gray-800 mb-2">Budget Category Sunburst Chart</h1>
+  <p class="text-gray-500 mb-6">カテゴリ階層で支出を管理し、サンバーストチャートで可視化します</p>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- 入力パネル -->
+    <div class="bg-white rounded-2xl shadow p-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">支出を追加</h2>
+      <div class="space-y-3">
+        <div>
+          <label for="catMain" class="block text-sm font-medium text-gray-600 mb-1">大カテゴリ</label>
+          <select id="catMain" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+            <option value="Housing">Housing（住居）</option>
+            <option value="Food">Food（食費）</option>
+            <option value="Transport">Transport（交通）</option>
+            <option value="Entertainment">Entertainment（娯楽）</option>
+            <option value="Health">Health（医療）</option>
+            <option value="Education">Education（教育）</option>
+            <option value="Other">Other（その他）</option>
+          </select>
+        </div>
+        <div>
+          <label for="catSub" class="block text-sm font-medium text-gray-600 mb-1">小カテゴリ</label>
+          <input id="catSub" type="text" placeholder="例: Rent, Groceries, Gas..." class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" aria-label="小カテゴリ名">
+        </div>
+        <div>
+          <label for="expAmount" class="block text-sm font-medium text-gray-600 mb-1">金額（円）</label>
+          <input id="expAmount" type="number" placeholder="例: 50000" min="1" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" aria-label="金額">
+        </div>
+        <div>
+          <label for="expLabel" class="block text-sm font-medium text-gray-600 mb-1">説明（任意）</label>
+          <input id="expLabel" type="text" placeholder="例: 4月分家賃" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" aria-label="説明">
+        </div>
+        <button onclick="addExpense()" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 rounded-lg transition" aria-label="支出を追加">追加する</button>
+      </div>
+
+      <!-- サマリ -->
+      <div class="mt-6 pt-4 border-t">
+        <div class="flex justify-between text-sm mb-2">
+          <span class="text-gray-500">合計支出</span>
+          <span id="totalAmount" class="font-bold text-xl text-blue-600">¥0</span>
+        </div>
+        <div id="categorySummary" class="space-y-1 mt-3"></div>
+      </div>
+
+      <!-- 支出リスト -->
+      <div class="mt-4">
+        <h3 class="text-sm font-semibold text-gray-600 mb-2">支出一覧</h3>
+        <div id="expenseList" class="space-y-2 max-h-60 overflow-y-auto"></div>
+      </div>
+
+      <div class="flex gap-2 mt-4">
+        <button onclick="exportData()" class="flex-1 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold py-2 rounded-lg transition" aria-label="CSVエクスポート">CSVエクスポート</button>
+        <button onclick="clearAll()" class="flex-1 bg-red-100 hover:bg-red-200 text-red-600 text-sm font-semibold py-2 rounded-lg transition" aria-label="全データ削除">全削除</button>
+      </div>
+    </div>
+
+    <!-- チャートパネル -->
+    <div class="bg-white rounded-2xl shadow p-6 flex flex-col items-center">
+      <h2 class="text-lg font-semibold text-gray-700 mb-2">サンバーストチャート</h2>
+      <p class="text-xs text-gray-400 mb-3">クリックでドリルダウン / 中心クリックで戻る</p>
+      <canvas id="sunburst" width="400" height="400" aria-label="サンバーストチャート"></canvas>
+      <div id="drillPath" class="mt-3 text-sm text-gray-500"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = {
+  Housing: '#3B82F6', Food: '#10B981', Transport: '#F59E0B',
+  Entertainment: '#EF4444', Health: '#8B5CF6', Education: '#EC4899', Other: '#6B7280'
+};
+const SUB_COLORS = ['#93C5FD','#6EE7B7','#FCD34D','#FCA5A5','#C4B5FD','#F9A8D4','#D1D5DB',
+                    '#60A5FA','#34D399','#FBBF24','#F87171','#A78BFA','#F472B6','#9CA3AF'];
+
+let expenses = [];
+try { expenses = JSON.parse(localStorage.getItem('sunburst_expenses') || '[]'); } catch(e) { expenses = []; }
+let drillTarget = null;
+
+function save() { localStorage.setItem('sunburst_expenses', JSON.stringify(expenses)); }
+
+function addExpense() {
+  const main = document.getElementById('catMain').value;
+  const sub = document.getElementById('catSub').value.trim() || main;
+  const amount = parseFloat(document.getElementById('expAmount').value);
+  const label = document.getElementById('expLabel').value.trim();
+  if (!amount || amount <= 0) { alert('金額を入力してください'); return; }
+  expenses.push({ main, sub, amount, label, id: Date.now() });
+  save();
+  document.getElementById('catSub').value = '';
+  document.getElementById('expAmount').value = '';
+  document.getElementById('expLabel').value = '';
+  render();
+}
+
+function deleteExpense(id) {
+  expenses = expenses.filter(e => e.id !== id);
+  save(); render();
+}
+
+function clearAll() {
+  if (confirm('全データを削除しますか？')) { expenses = []; drillTarget = null; save(); render(); }
+}
+
+function buildTree() {
+  const tree = {};
+  for (const e of expenses) {
+    if (!tree[e.main]) tree[e.main] = { total: 0, subs: {} };
+    tree[e.main].total += e.amount;
+    if (!tree[e.main].subs[e.sub]) tree[e.main].subs[e.sub] = 0;
+    tree[e.main].subs[e.sub] += e.amount;
+  }
+  return tree;
+}
+
+function drawSunburst() {
+  const canvas = document.getElementById('sunburst');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2, cy = H / 2;
+  ctx.clearRect(0, 0, W, H);
+
+  const tree = buildTree();
+  const mainKeys = Object.keys(tree);
+  if (mainKeys.length === 0) {
+    ctx.fillStyle = '#E5E7EB';
+    ctx.beginPath(); ctx.arc(cx, cy, 160, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#9CA3AF';
+    ctx.textAlign = 'center'; ctx.font = '14px sans-serif';
+    ctx.fillText('支出を追加してください', cx, cy);
+    return;
+  }
+
+  const total = expenses.reduce((s, e) => s + e.amount, 0);
+  const innerR = 60, midR = 120, outerR = 170;
+
+  canvas._segments = [];
+
+  if (!drillTarget) {
+    // 外輪: 大カテゴリ
+    let angle = -Math.PI / 2;
+    for (const key of mainKeys) {
+      const slice = (tree[key].total / total) * Math.PI * 2;
+      const color = COLORS[key] || '#6B7280';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, midR, angle, angle + slice);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+      canvas._segments.push({ type: 'main', key, startAngle: angle, endAngle: angle + slice, r: midR });
+      // ラベル
+      const midA = angle + slice / 2;
+      const lx = cx + Math.cos(midA) * 85, ly = cy + Math.sin(midA) * 85;
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+      if (slice > 0.2) ctx.fillText(key, lx, ly);
+      // サブカテゴリ外輪
+      let subAngle = angle;
+      let si = 0;
+      for (const [sub, val] of Object.entries(tree[key].subs)) {
+        const subSlice = (val / tree[key].total) * slice;
+        const sc = SUB_COLORS[si++ % SUB_COLORS.length];
+        ctx.beginPath();
+        ctx.arc(cx, cy, outerR, subAngle, subAngle + subSlice);
+        ctx.arc(cx, cy, midR, subAngle + subSlice, subAngle, true);
+        ctx.closePath();
+        ctx.fillStyle = sc; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+        canvas._segments.push({ type: 'sub', mainKey: key, key: sub, startAngle: subAngle, endAngle: subAngle + subSlice, r1: midR, r2: outerR });
+        const ma = subAngle + subSlice / 2;
+        const lxs = cx + Math.cos(ma) * 148, lys = cy + Math.sin(ma) * 148;
+        ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+        if (subSlice > 0.15) ctx.fillText(sub, lxs, lys);
+        subAngle += subSlice;
+      }
+      angle += slice;
+    }
+  } else {
+    // ドリルダウン表示
+    const node = tree[drillTarget];
+    if (!node) { drillTarget = null; drawSunburst(); return; }
+    const subs = Object.entries(node.subs);
+    let angle = -Math.PI / 2;
+    for (const [sub, val] of subs) {
+      const slice = (val / node.total) * Math.PI * 2;
+      const si = subs.findIndex(s => s[0] === sub);
+      const color = SUB_COLORS[si % SUB_COLORS.length];
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, outerR, angle, angle + slice);
+      ctx.closePath();
+      ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+      canvas._segments.push({ type: 'drill_sub', key: sub, startAngle: angle, endAngle: angle + slice, r: outerR });
+      const ma = angle + slice / 2;
+      const lx = cx + Math.cos(ma) * 120, ly = cy + Math.sin(ma) * 120;
+      ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+      if (slice > 0.15) ctx.fillText(sub, lx, ly);
+      angle += slice;
+    }
+    // 中心に戻るボタン
+    ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+    ctx.fillStyle = COLORS[drillTarget] || '#6B7280'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 11px sans-serif';
+    ctx.fillText('← 戻る', cx, cy - 6);
+    ctx.font = '10px sans-serif';
+    ctx.fillText(drillTarget, cx, cy + 10);
+  }
+
+  // 中心円
+  if (!drillTarget) {
+    ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.fillStyle = '#374151'; ctx.textAlign = 'center';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText('合計', cx, cy - 8);
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillStyle = '#2563EB';
+    ctx.fillText('¥' + total.toLocaleString(), cx, cy + 12);
+  }
+}
+
+function getAngle(cx, cy, x, y) { return Math.atan2(y - cy, x - cx); }
+function getDist(cx, cy, x, y) { return Math.sqrt((x-cx)**2 + (y-cy)**2); }
+
+document.getElementById('sunburst').addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const cx = this.width / 2, cy = this.height / 2;
+  const d = getDist(cx, cy, x, y);
+  const a = getAngle(cx, cy, x, y);
+
+  if (drillTarget && d < 60) { drillTarget = null; render(); return; }
+
+  for (const seg of (this._segments || [])) {
+    let inAngle = false;
+    let sa = seg.startAngle, ea = seg.endAngle;
+    let normA = a;
+    if (normA < sa) normA += Math.PI * 2;
+    inAngle = normA >= sa && normA <= ea;
+
+    if (seg.type === 'main' && d < 120 && d > 0 && inAngle) {
+      drillTarget = seg.key;
+      document.getElementById('drillPath').textContent = '表示中: ' + seg.key;
+      render(); return;
+    }
+  }
+});
+
+document.getElementById('sunburst').addEventListener('mousemove', function(e) {
+  const rect = this.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const cx = this.width / 2, cy = this.height / 2;
+  const d = getDist(cx, cy, x, y);
+  const a = getAngle(cx, cy, x, y);
+  const tooltip = document.getElementById('tooltip');
+  const tree = buildTree();
+
+  for (const seg of (this._segments || [])) {
+    let sa = seg.startAngle, ea = seg.endAngle;
+    let normA = a;
+    if (normA < sa) normA += Math.PI * 2;
+    const inAngle = normA >= sa && normA <= ea;
+    if (!inAngle) continue;
+
+    if (seg.type === 'main' && d < 120) {
+      const v = tree[seg.key]?.total || 0;
+      const pct = (v / expenses.reduce((s,e)=>s+e.amount,0)*100).toFixed(1);
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY - 28) + 'px';
+      tooltip.textContent = seg.key + ': ¥' + v.toLocaleString() + ' (' + pct + '%)';
+      return;
+    }
+    if ((seg.type === 'sub' || seg.type === 'drill_sub') && d > 120) {
+      const key = seg.mainKey || drillTarget;
+      const v = tree[key]?.subs[seg.key] || 0;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY - 28) + 'px';
+      tooltip.textContent = seg.key + ': ¥' + v.toLocaleString();
+      return;
+    }
+  }
+  tooltip.style.display = 'none';
+});
+
+document.getElementById('sunburst').addEventListener('mouseleave', () => {
+  document.getElementById('tooltip').style.display = 'none';
+});
+
+function renderList() {
+  const list = document.getElementById('expenseList');
+  list.innerHTML = '';
+  expenses.slice().reverse().forEach(e => {
+    const div = document.createElement('div');
+    div.className = 'flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2 text-sm';
+    const info = document.createElement('div');
+    const name = document.createElement('span');
+    name.className = 'font-medium text-gray-700';
+    name.textContent = e.main + ' / ' + e.sub;
+    const desc = document.createElement('span');
+    desc.className = 'text-gray-400 text-xs ml-2';
+    desc.textContent = e.label || '';
+    info.appendChild(name); info.appendChild(desc);
+    const right = document.createElement('div');
+    right.className = 'flex items-center gap-2';
+    const amt = document.createElement('span');
+    amt.className = 'text-blue-600 font-semibold';
+    amt.textContent = '¥' + e.amount.toLocaleString();
+    const btn = document.createElement('button');
+    btn.className = 'text-red-400 hover:text-red-600 text-xs';
+    btn.setAttribute('aria-label', '削除');
+    btn.textContent = '✕';
+    btn.onclick = () => deleteExpense(e.id);
+    right.appendChild(amt); right.appendChild(btn);
+    div.appendChild(info); div.appendChild(right);
+    list.appendChild(div);
+  });
+}
+
+function renderSummary() {
+  const tree = buildTree();
+  const total = expenses.reduce((s,e) => s+e.amount, 0);
+  document.getElementById('totalAmount').textContent = '¥' + total.toLocaleString();
+  const summary = document.getElementById('categorySummary');
+  summary.innerHTML = '';
+  for (const [key, val] of Object.entries(tree)) {
+    const pct = total > 0 ? (val.total / total * 100).toFixed(1) : 0;
+    const row = document.createElement('div');
+    row.className = 'text-xs text-gray-500 flex justify-between';
+    const kSpan = document.createElement('span');
+    kSpan.textContent = key;
+    const vSpan = document.createElement('span');
+    vSpan.className = 'font-medium text-gray-700';
+    vSpan.textContent = '¥' + val.total.toLocaleString() + ' (' + pct + '%)';
+    row.appendChild(kSpan); row.appendChild(vSpan);
+    summary.appendChild(row);
+  }
+}
+
+function render() {
+  renderList();
+  renderSummary();
+  drawSunburst();
+  if (!drillTarget) document.getElementById('drillPath').textContent = '';
+}
+
+function exportData() {
+  if (expenses.length === 0) { alert('データがありません'); return; }
+  let csv = '大カテゴリ,小カテゴリ,金額,説明\n';
+  for (const e of expenses) {
+    csv += `"${e.main}","${e.sub}",${e.amount},"${e.label}"\n`;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  a.download = 'budget_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+}
+
+render();
+</script>
+</body>
+</html>
